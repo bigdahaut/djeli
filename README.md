@@ -17,7 +17,7 @@ curl -fsSL https://raw.githubusercontent.com/bigdahaut/djeli/main/install.sh | s
 **Windows (PowerShell):**
 
 ```powershell
-irm https://raw.githubusercontent.com/YOUR_USERNAME/djeli/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/bigdahaut/djeli/main/install.ps1 | iex
 ```
 
 ## Quick start
