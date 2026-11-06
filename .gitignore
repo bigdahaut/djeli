@@ -1,0 +1,5 @@
+github/README-github.md
+/target
+*.gguf
+.env
+.DS_Store
