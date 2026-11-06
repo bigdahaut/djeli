@@ -13,9 +13,15 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             asset: djeli-linux-x86_64
+          # macOS Apple Silicon (M1/M2/M3)
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: djeli-macos-aarch64
+          # macOS Intel
+          - os: macos-13
+            target: x86_64-apple-darwin
+            asset: djeli-macos-x86_64
+          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             asset: djeli-windows-x86_64.exe
