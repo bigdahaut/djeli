@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$Base = "https://github.com/YOUR_USERNAME/djeli/releases/latest/download"
+$Base = "https://github.com/bigdahaut/djeli/releases/latest/download"
 $Bin = "djeli.exe"
 $InstallDir = "$env:LOCALAPPDATA\djeli\bin"
 

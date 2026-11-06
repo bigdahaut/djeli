@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO="YOUR_USERNAME/djeli"
+REPO="bigdahaut/djeli"
 BASE="https://github.com/${REPO}/releases/latest/download"
 BIN="djeli"
 INSTALL_DIR="${DJELI_INSTALL_DIR:-$HOME/.local/bin}"
