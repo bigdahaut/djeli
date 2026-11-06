@@ -5,10 +5,16 @@ $Bin = "djeli.exe"
 $InstallDir = "$env:LOCALAPPDATA\djeli\bin"
 $ModelsDir = "$env:USERPROFILE\.djeli\models"
 
-$arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+# Use environment variables for bulletproof architecture detection
+$arch = $env:PROCESSOR_ARCHITECTURE
+if ($env:PROCESSOR_ARCHITEW6432) {
+    # Catches 32-bit PowerShell running on 64-bit Windows
+    $arch = $env:PROCESSOR_ARCHITEW6432
+}
+
 switch ($arch) {
-    "X64"   { $asset = "djeli-windows-x86_64.exe" }
-    default { throw "Unsupported architecture: $arch" }
+    "AMD64" { $asset = "djeli-windows-x86_64.exe" }
+    default { throw "Unsupported architecture: $arch. djeli currently requires 64-bit Windows." }
 }
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
