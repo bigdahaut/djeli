@@ -41,6 +41,66 @@ const STOP_TOKEN_CANDIDATES: [&str; 4] = ["</s>", "<|im_end|>", "<|endoftext|>",
 const TRAILING_MARKERS: [&str; 5] = ["<|im_end|>", "<|eot_id|>", "<|endoftext|>", "</s>", "<|end|>"];
 const DEFAULT_SYSTEM_PROMPT: &str = "You are a helpful assistant.";
 
+// ===========================================================================
+// Modelfile Parser
+// ===========================================================================
+
+#[derive(Default, Clone)]
+struct ModelfileConfig {
+    system: Option<String>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    repeat_penalty: Option<f32>,
+}
+
+fn load_modelfile(models_dir: &Path, model_name: &str) -> ModelfileConfig {
+    let mut config = ModelfileConfig::default();
+    let model_path = models_dir.join(format!("{}.model", model_name));
+
+    if let Ok(content) = fs::read_to_string(&model_path) {
+        let mut current_system = String::new();
+        let mut in_system_block = false;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            if in_system_block {
+                if line == "\"\"\"" {
+                    in_system_block = false;
+                    config.system = Some(current_system.trim().to_string());
+                    current_system.clear();
+                } else {
+                    current_system.push_str(line);
+                    current_system.push('\n');
+                }
+                continue;
+            }
+
+            if let Some(rest) = line.strip_prefix("SYSTEM ") {
+                if rest == "\"\"\"" {
+                    in_system_block = true;
+                } else {
+                    config.system = Some(rest.to_string());
+                }
+            } else if let Some(rest) = line.strip_prefix("PARAMETER temperature ") {
+                config.temperature = rest.parse().ok();
+            } else if let Some(rest) = line.strip_prefix("PARAMETER top_p ") {
+                config.top_p = rest.parse().ok();
+            } else if let Some(rest) = line.strip_prefix("PARAMETER repeat_penalty ") {
+                config.repeat_penalty = rest.parse().ok();
+            }
+        }
+    }
+    config
+}
+
+// ===========================================================================
+// Command line
+// ===========================================================================
+
 #[derive(Parser)]
 #[command(
     name = "djeli",
@@ -63,9 +123,7 @@ enum Commands {
         models_dir: Option<String>,
     },
     Run(RunArgs),
-    /// Download a model from Hugging Face into the models folder
     Pull {
-        /// Model alias (e.g. qwen2.5-1.5b), a Hugging Face path (user/repo/file.gguf), or a direct URL
         model: String,
     },
     #[command(visible_alias = "ls")]
@@ -81,8 +139,8 @@ struct RunArgs {
     model: String,
     prompt: Vec<String>,
 
-    #[arg(long, default_value_t = 0.7)]
-    temperature: f64,
+    #[arg(long)]
+    temperature: Option<f64>,
 
     #[arg(long)]
     top_p: Option<f64>,
@@ -322,7 +380,6 @@ fn cmd_list(host: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Resolves a shorthand name, HF path, or raw URL into a direct download link.
 fn get_download_url(name: &str) -> String {
     if name.starts_with("http://") || name.starts_with("https://") {
         return name.to_string();
@@ -338,14 +395,11 @@ fn get_download_url(name: &str) -> String {
         "llama3.2-3b" => "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
         "phi3.5-mini" => "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf",
         _ => {
-            // Generic Hugging Face repo/file support:
-            // If the user passes "user/repo/file.gguf", convert to the HF resolve URL.
             let parts: Vec<&str> = name.split('/').collect();
             if parts.len() == 3 {
                 let url = format!("https://huggingface.co/{}/{}/resolve/main/{}", parts[0], parts[1], parts[2]);
                 return url;
             }
-            
             eprintln!("Unknown model alias '{}'.", name);
             eprintln!("Available aliases: tinyllama, qwen2.5-0.5b, qwen2.5-1.5b, llama3.2-1b, llama3.2-3b, phi3.5-mini");
             eprintln!("Or provide a full Hugging Face path (e.g. user/repo/file.gguf)");
@@ -371,58 +425,96 @@ fn cmd_pull(models_dir: &Path, name: &str) -> anyhow::Result<()> {
     }
 
     let dest_path = models_dir.join(&filename);
+    let model_stem = Path::new(&filename).file_stem().unwrap_or_default().to_string_lossy();
+    let modelfile_path = models_dir.join(format!("{}.model", model_stem));
+
     if dest_path.exists() {
         println!("Model '{}' already exists at {}", filename, dest_path.display());
-        return Ok(());
-    }
+    } else {
+        println!("Pulling {} from Hugging Face...", filename);
+        println!("URL: {}", url);
 
-    println!("Pulling {} from Hugging Face...", filename);
-    println!("URL: {}", url);
+        let agent = ureq::AgentBuilder::new()
+            .timeout_read(Duration::from_secs(3600))
+            .timeout_write(Duration::from_secs(3600))
+            .build();
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_read(Duration::from_secs(3600))
-        .timeout_write(Duration::from_secs(3600))
-        .build();
-
-    let resp = agent.get(&url).call().map_err(|e| anyhow!("download failed: {e}"))?;
-    
-    let total_size = resp.header("Content-Length")
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(0);
-
-    let mut reader = resp.into_reader();
-    let mut file = File::create(&dest_path)?;
-    
-    let mut downloaded = 0u64;
-    let mut buffer = [0; 16384];
-    
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 { break; }
-        file.write_all(&buffer[..n])?;
-        downloaded += n as u64;
+        let resp = agent.get(&url).call().map_err(|e| anyhow!("download failed: {e}"))?;
         
-        if total_size > 0 {
-            let pct = (downloaded as f64 / total_size as f64) * 100.0;
-            print!("\rDownloading: {:>5.1}% ({:>8} / {:>8})", pct, human_size(downloaded), human_size(total_size));
-            std::io::stdout().flush()?;
-        } else {
-            print!("\rDownloading: {:>8}", human_size(downloaded));
-            std::io::stdout().flush()?;
+        let total_size = resp.header("Content-Length")
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        let mut reader = resp.into_reader();
+        let mut file = File::create(&dest_path)?;
+        
+        let mut downloaded = 0u64;
+        let mut buffer = [0; 16384];
+        
+        loop {
+            let n = reader.read(&mut buffer)?;
+            if n == 0 { break; }
+            file.write_all(&buffer[..n])?;
+            downloaded += n as u64;
+            
+            if total_size > 0 {
+                let pct = (downloaded as f64 / total_size as f64) * 100.0;
+                print!("\rDownloading: {:>5.1}% ({:>8} / {:>8})", pct, human_size(downloaded), human_size(total_size));
+                std::io::stdout().flush()?;
+            } else {
+                print!("\rDownloading: {:>8}", human_size(downloaded));
+                std::io::stdout().flush()?;
+            }
         }
+        println!("\nDownload complete. Saved to {}", dest_path.display());
     }
-    
-    println!("\nDownload complete. Saved to {}", dest_path.display());
+
+    // Auto-generate the Modelfile scaffold if it doesn't exist
+    if !modelfile_path.exists() {
+        let scaffold = format!(
+            r#"# djeli Modelfile for {}
+# Uncomment and edit these lines to override the default GGUF behavior.
+
+# SYSTEM """
+# You are a helpful assistant.
+# """
+
+# PARAMETER temperature 0.7
+# PARAMETER top_p 0.9
+# PARAMETER repeat_penalty 1.1
+"#,
+            model_stem
+        );
+        fs::write(&modelfile_path, scaffold)?;
+        println!("Created customizable Modelfile at {}", modelfile_path.display());
+    }
+
     Ok(())
 }
 
-fn cmd_run(host: &str, args: RunArgs) -> anyhow::Result<()> {
+fn cmd_run(host: &str, mut args: RunArgs) -> anyhow::Result<()> {
     let base = base_url(host);
     let model_name = args
         .model
         .strip_suffix(":latest")
         .unwrap_or(&args.model)
         .to_string();
+
+    let models_dir = resolve_models_dir(None, &Config::default());
+    let modelfile = load_modelfile(&models_dir, &model_name);
+
+    if args.system.is_none() {
+        args.system = modelfile.system;
+    }
+    if args.temperature.is_none() {
+        args.temperature = modelfile.temperature;
+    }
+    if args.top_p.is_none() {
+        args.top_p = modelfile.top_p;
+    }
+    if args.repeat_penalty.is_none() {
+        args.repeat_penalty = modelfile.repeat_penalty;
+    }
 
     let mut prompt = args.prompt.join(" ");
     let stdin_is_pipe = !std::io::stdin().is_terminal();
@@ -758,8 +850,8 @@ struct GenerationRequest {
     prompt: String,
     #[serde(default)]
     messages: Option<Vec<ChatMessage>>,
-    #[serde(default = "default_temp")]
-    temperature: f64,
+    #[serde(default)]
+    temperature: Option<f64>,
     #[serde(default)]
     top_p: Option<f64>,
     #[serde(default)]
@@ -783,10 +875,6 @@ struct ModelTag {
 #[derive(Serialize)]
 struct TagsResponse {
     models: Vec<ModelTag>,
-}
-
-fn default_temp() -> f64 {
-    0.7
 }
 
 enum GenEvent {
@@ -882,7 +970,10 @@ fn strip_trailing_markers(mut s: String) -> String {
     s
 }
 
-fn build_messages(req: &GenerationRequest) -> anyhow::Result<Vec<ChatMessage>> {
+fn build_messages(
+    req: &GenerationRequest,
+    models_dir: &str,
+) -> anyhow::Result<Vec<ChatMessage>> {
     let mut messages = match &req.messages {
         Some(m) if !m.is_empty() => m.clone(),
         _ => {
@@ -899,7 +990,16 @@ fn build_messages(req: &GenerationRequest) -> anyhow::Result<Vec<ChatMessage>> {
         }
     }
 
-    let system = req.system.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let modelfile = load_modelfile(Path::new(models_dir), &req.model);
+
+    let system = req
+        .system
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or(modelfile.system);
+
     if let Some(sys) = system {
         if !messages.iter().any(|m| m.role == "system") {
             messages.insert(0, msg("system", sys));
@@ -1002,9 +1102,16 @@ async fn serve(host: String, models_dir: PathBuf, config_path: PathBuf) -> anyho
     fs::create_dir_all(&models_dir)?;
     let models_dir_str = models_dir.to_string_lossy().into_owned();
 
+    let device = Device::cuda_if_available(0).unwrap_or(Device::Cpu);
+    if device.is_cpu() {
+        println!("   Device: CPU");
+    } else {
+        println!("   Device: GPU (CUDA)");
+    }
+
     let state = Arc::new(AppState {
         loaded_models: Mutex::new(HashMap::new()),
-        device: Device::Cpu,
+        device,
         models_dir: models_dir_str.clone(),
     });
 
@@ -1260,7 +1367,7 @@ async fn openai_chat_handler(
         model: req.model.clone(),
         prompt: String::new(),
         messages: Some(messages),
-        temperature: req.temperature.unwrap_or_else(default_temp),
+        temperature: req.temperature,
         top_p: req.top_p,
         seed: req.seed,
         max_tokens: Some(
@@ -1409,7 +1516,7 @@ fn run_generation(
         bail!("invalid model name");
     }
 
-    let messages = build_messages(&req)?;
+    let messages = build_messages(&req, &state.models_dir)?;
 
     let model_arc = get_or_load_model(state, &req.model)?;
     let mut guard = lock(&model_arc);
@@ -1419,6 +1526,19 @@ fn run_generation(
         chat_template,
     } = &mut *guard;
 
+    let modelfile = load_modelfile(Path::new(&state.models_dir), &req.model);
+
+    // Priority: Request (API) > Modelfile > Hardcoded Default
+    let temp = req.temperature.or(modelfile.temperature).unwrap_or(0.7);
+    let temperature = if temp <= 0.0 { None } else { Some(temp) };
+
+    let p = req.top_p.or(modelfile.top_p).unwrap_or(0.9);
+    let top_p = Some(p).filter(|v| *v > 0.0 && *v < 1.0);
+    
+    let repeat_penalty = req.repeat_penalty.or(modelfile.repeat_penalty).unwrap_or(1.1);
+    let repeat_last_n = req.repeat_last_n.unwrap_or(64);
+    let seed = req.seed.unwrap_or_else(random_seed);
+    
     let formatted_prompt = render_chat_template(chat_template.as_deref(), &messages)?;
     tracing::debug!(prompt = %formatted_prompt, "formatted prompt");
 
@@ -1446,15 +1566,6 @@ fn run_generation(
         stop_tokens.push(2);
     }
 
-    let temperature = if req.temperature <= 0.0 {
-        None
-    } else {
-        Some(req.temperature)
-    };
-    let top_p = Some(req.top_p.unwrap_or(0.9)).filter(|p| *p > 0.0 && *p < 1.0);
-    let repeat_penalty = req.repeat_penalty.unwrap_or(1.1);
-    let repeat_last_n = req.repeat_last_n.unwrap_or(64);
-    let seed = req.seed.unwrap_or_else(random_seed);
     let mut logits_processor = LogitsProcessor::new(seed, temperature, top_p);
 
     let input = Tensor::new(prompt_tokens.as_slice(), &state.device)?.unsqueeze(0)?;
