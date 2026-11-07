@@ -63,6 +63,11 @@ enum Commands {
         models_dir: Option<String>,
     },
     Run(RunArgs),
+    /// Download a model from Hugging Face into the models folder
+    Pull {
+        /// Model alias (e.g. qwen2.5-1.5b), a Hugging Face path (user/repo/file.gguf), or a direct URL
+        model: String,
+    },
     #[command(visible_alias = "ls")]
     List,
     Stop {
@@ -125,6 +130,11 @@ fn real_main() -> anyhow::Result<()> {
             runtime.block_on(serve(host, models_dir, cfg_path))
         }
         Commands::Run(args) => cmd_run(&resolve_host(cli.host, &cfg), args),
+        Commands::Pull { model } => {
+            let models_dir = resolve_models_dir(None, &cfg);
+            fs::create_dir_all(&models_dir)?;
+            cmd_pull(&models_dir, &model)
+        }
         Commands::List => cmd_list(&resolve_host(cli.host, &cfg)),
         Commands::Stop { model } => cmd_stop(&resolve_host(cli.host, &cfg), model),
         Commands::Config => cmd_config(cli.host),
@@ -292,7 +302,7 @@ fn cmd_list(host: &str) -> anyhow::Result<()> {
     let models = body["models"].as_array().cloned().unwrap_or_default();
 
     if models.is_empty() {
-        println!("No models found. Copy .gguf files into the server's models folder (see `djeli config`).");
+        println!("No models found. Pull one with `djeli pull <model>` or copy .gguf files into the models folder (see `djeli config`).");
         return Ok(());
     }
 
@@ -309,6 +319,100 @@ fn cmd_list(host: &str) -> anyhow::Result<()> {
         let size = m["size"].as_u64().unwrap_or(0);
         println!("{:<width$}  {}", name, human_size(size));
     }
+    Ok(())
+}
+
+/// Resolves a shorthand name, HF path, or raw URL into a direct download link.
+fn get_download_url(name: &str) -> String {
+    if name.starts_with("http://") || name.starts_with("https://") {
+        return name.to_string();
+    }
+
+    let name = name.strip_suffix(":latest").unwrap_or(name);
+
+    let url = match name {
+        "tinyllama" => "https://huggingface.co/TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF/resolve/main/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+        "qwen2.5-1.5b" | "qwen2.5" | "qwen" => "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+        "qwen2.5-0.5b" => "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+        "llama3.2-1b" | "llama3.2" => "https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "llama3.2-3b" => "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "phi3.5-mini" => "https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf",
+        _ => {
+            // Generic Hugging Face repo/file support:
+            // If the user passes "user/repo/file.gguf", convert to the HF resolve URL.
+            let parts: Vec<&str> = name.split('/').collect();
+            if parts.len() == 3 {
+                let url = format!("https://huggingface.co/{}/{}/resolve/main/{}", parts[0], parts[1], parts[2]);
+                return url;
+            }
+            
+            eprintln!("Unknown model alias '{}'.", name);
+            eprintln!("Available aliases: tinyllama, qwen2.5-0.5b, qwen2.5-1.5b, llama3.2-1b, llama3.2-3b, phi3.5-mini");
+            eprintln!("Or provide a full Hugging Face path (e.g. user/repo/file.gguf)");
+            std::process::exit(1);
+        }
+    };
+    url.to_string()
+}
+
+fn cmd_pull(models_dir: &Path, name: &str) -> anyhow::Result<()> {
+    let url = get_download_url(name);
+    
+    let mut filename = if name.starts_with("http") {
+        url.split('/').last().unwrap_or("model.gguf").to_string()
+    } else if name.contains('/') {
+        name.split('/').last().unwrap_or("model.gguf").to_string()
+    } else {
+        format!("{}.gguf", name.strip_suffix(":latest").unwrap_or(name).replace(':', "-"))
+    };
+    
+    if !filename.ends_with(".gguf") {
+        filename.push_str(".gguf");
+    }
+
+    let dest_path = models_dir.join(&filename);
+    if dest_path.exists() {
+        println!("Model '{}' already exists at {}", filename, dest_path.display());
+        return Ok(());
+    }
+
+    println!("Pulling {} from Hugging Face...", filename);
+    println!("URL: {}", url);
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(Duration::from_secs(3600))
+        .timeout_write(Duration::from_secs(3600))
+        .build();
+
+    let resp = agent.get(&url).call().map_err(|e| anyhow!("download failed: {e}"))?;
+    
+    let total_size = resp.header("Content-Length")
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+
+    let mut reader = resp.into_reader();
+    let mut file = File::create(&dest_path)?;
+    
+    let mut downloaded = 0u64;
+    let mut buffer = [0; 16384];
+    
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 { break; }
+        file.write_all(&buffer[..n])?;
+        downloaded += n as u64;
+        
+        if total_size > 0 {
+            let pct = (downloaded as f64 / total_size as f64) * 100.0;
+            print!("\rDownloading: {:>5.1}% ({:>8} / {:>8})", pct, human_size(downloaded), human_size(total_size));
+            std::io::stdout().flush()?;
+        } else {
+            print!("\rDownloading: {:>8}", human_size(downloaded));
+            std::io::stdout().flush()?;
+        }
+    }
+    
+    println!("\nDownload complete. Saved to {}", dest_path.display());
     Ok(())
 }
 
@@ -923,7 +1027,7 @@ async fn serve(host: String, models_dir: PathBuf, config_path: PathBuf) -> anyho
     println!("   models folder: {models_dir_str}");
     println!("   config file:   {}", config_path.display());
     if scan_models(&models_dir_str).is_empty() {
-        println!("   no models yet: copy a .gguf file into the models folder.");
+        println!("   no models yet: pull one with `djeli pull qwen2.5-1.5b` or copy a .gguf file into the models folder.");
     }
 
     axum::serve(listener, app).await?;

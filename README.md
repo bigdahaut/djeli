@@ -22,15 +22,23 @@ irm https://raw.githubusercontent.com/bigdahaut/djeli/main/install.ps1 | iex
 
 ## Quick start
 
-```bash
-mkdir -p ~/.djeli/models
-curl -L -o ~/.djeli/models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
-  https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf
+Download a model directly from Hugging Face:
 
-djeli serve
-# In another terminal:
-djeli run qwen2.5-1.5b-instruct-q4_k_m
+```bash
+djeli pull qwen2.5-1.5b
 ```
+
+Start the server:
+
+```bash
+djeli serve
+```
+# In another terminal:
+```bash
+djeli run qwen2.5-1.5b
+```
+
+(Available aliases: tinyllama, qwen2.5-0.5b, qwen2.5-1.5b, llama3.2-1b, llama3.2-3b, phi3.5-mini)
 
 ## Commands
 
