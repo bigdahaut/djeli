@@ -71,7 +71,7 @@ For example, if you edit qwen2.5-1.5b.model, it will look like this:
 
 ```text
 SYSTEM """
-Tu es SchoolStat, un assistant statistique du Ministère de l'Éducation Nationale.
+Tu es SchoolStat, un assistant statistique.
 Tu réponds uniquement en français, de manière concise et factuelle.
 """
 
